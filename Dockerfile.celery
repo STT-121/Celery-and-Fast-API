@@ -1,0 +1,20 @@
+# Use an official Python runtime as a parent image
+FROM python:3.11-slim
+
+# Set the working directory
+WORKDIR /app
+
+# Copy the current directory contents into the container at /app
+COPY . /app
+
+# Install any needed packages specified in requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Change the working directory to the subdirectory fastapi-celery-project
+WORKDIR /app/fastapi-celery-project
+
+# Define environment variable
+ENV NAME Celery
+
+# Run Celery worker when the container launches
+CMD ["celery", "-A", "task.celery", "worker", "--loglevel=info"]

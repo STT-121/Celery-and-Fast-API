@@ -1241,7 +1241,7 @@ Add SQLAlchemy and its dependencies to your `requirements.txt` file:
 text
 ```text
 SQLAlchemy==1.4.39
-alembic==1.7.7
+alembic==1.13.2
 ```
 Install the new dependencies:
 
@@ -1273,7 +1273,7 @@ Define your database models in a `models.py` file:
 python
 ```python
 from sqlalchemy import Column, Integer, String
-from .database import Base
+from database import Base
 
 class User(Base):
     __tablename__ = "users"
@@ -1318,7 +1318,7 @@ fileConfig(config.config_file_name)
 
 # add your model's MetaData object here
 # for 'autogenerate' support
-from app.models import Base  # Add this line
+from models import Base  # Add this line
 target_metadata = Base.metadata
 
 # other values from the config, defined by the needs of env.py,
@@ -1386,12 +1386,12 @@ bash
 
 #### 1. Using SQLAlchemy Sessions in Celery Tasks
 
-Update `tasks.py` to use SQLAlchemy sessions:
+Update `task.py` to use SQLAlchemy sessions:
 
 python
 ```python
-from .database import SessionLocal
-from .models import User
+from database import SessionLocal
+from models import User
 
 celery = create_celery()
 
@@ -1429,6 +1429,10 @@ from .tasks import add_user
 
 api_router = APIRouter()
 
+class User(BaseModel):
+    name: str
+    email: str
+
 @api_router.post("/tasks/add_user")
 def run_add_user_task(name: str, email: str):
     task = add_user.apply_async((name, email))
@@ -1436,15 +1440,23 @@ def run_add_user_task(name: str, email: str):
 
 @api_router.get("/tasks/{task_id}")
 def get_task_status(task_id: str):
-    task = AsyncResult(task_id)
+    app=create_app()
+    task = app.celery.AsyncResult(task_id)    
     if task.state == 'PENDING':
         return {"task_id": task.id, "state": task.state}
     elif task.state != 'FAILURE':
         return {"task_id": task.id, "state": task.state, "result": task.result}
     else:
-        return {"task_id": task.id, "state": task.state, "error": str(task.info)} 
+        return {"task_id": task.id, "state": task.state, "error": str(task.info)}
 ```
 Start the FastAPI application and Celery worker, then test the task by sending a request to add a user.
+bash
+```bash
+(venv)$ curl -X POST "http://localhost:8000/tasks/add_user" -H "Content-Type: application/json" -d '{"name":"taymoor","email":"abcd@gmail.com"}'
+```
+```bash
+(venv)$ curl -X GET "http://localhost:8000/tasks/{task_id}"
+```
 
 ### Conclusion
 
@@ -1492,6 +1504,9 @@ COPY . /app
 # Install any needed packages specified in requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Change the working directory to the subdirectory fastapi-celery-project
+WORKDIR /app/fastapi-celery-project
+
 # Make port 8000 available to the world outside this container
 EXPOSE 8000
 
@@ -1499,7 +1514,7 @@ EXPOSE 8000
 ENV NAME FastAPI
 
 # Run app.py when the container launches
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"] 
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 ##### Dockerfile for Celery
 
@@ -1519,11 +1534,14 @@ COPY . /app
 # Install any needed packages specified in requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Change the working directory to the subdirectory fastapi-celery-project
+WORKDIR /app/fastapi-celery-project
+
 # Define environment variable
 ENV NAME Celery
 
 # Run Celery worker when the container launches
-CMD ["celery", "-A", "app_factory.celery", "worker", "--loglevel=info"] 
+CMD ["celery", "-A", "task.celery", "worker", "--loglevel=info"]
 ```
 #### 3. Create a Docker Compose Configuration
 
@@ -1621,7 +1639,7 @@ def get_settings() -> Settings:
 Optimize your Dockerfiles using multi-stage builds to reduce the size of your Docker images. Example for FastAPI:
 
 dockerfile
-```docker
+```bash
 # Use an official Python runtime as a parent image
 FROM python:3.11-slim AS builder
 
@@ -1640,6 +1658,9 @@ FROM python:3.11-slim
 WORKDIR /app
 
 COPY --from=builder /app /app
+
+# Change the working directory to the subdirectory fastapi-celery-project
+WORKDIR /app/fastapi-celery-project
 
 EXPOSE 8000
 
@@ -1693,11 +1714,15 @@ In this chapter, we will explore techniques for validating Celery tasks to ensur
 
 Pydantic is a powerful data validation library that integrates seamlessly with FastAPI. You can use Pydantic models to validate the input data for your Celery tasks.
 
-Update `tasks.py` to use Pydantic models for input validation:
+Update `task.py` to use Pydantic models for input validation:
 
 python
 ```python
 from pydantic import BaseModel, EmailStr, ValidationError
+
+celery = create_celery()
+
+logger = logging.getLogger(__name__)
 
 class UserInput(BaseModel):
     name: str
@@ -1768,9 +1793,9 @@ python
 ```python
 import pytest
 from celery.result import EagerResult
-from app.tasks import add_user
-from app.models import User
-from app.database import SessionLocal, Base, engine
+from .tasks import add_user
+from .models import User
+from .database import SessionLocal, Base, engine
 
 # Create a new database for testing
 Base.metadata.create_all(bind=engine)
@@ -1860,19 +1885,23 @@ services:
     environment:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
-
   redis:
     image: "redis:6-alpine"
     ports:
       - "6379:6379"
 
-  flower:
-    image: "mher/flower"
-    command: ["--broker=redis://redis:6379/0"]
+  celery-flower:
+    build:
+      context: .
+      dockerfile: Dockerfile.celery
+    command: ["celery", "-A", "task.celery", "flower", "--port=5555"]
     ports:
       - "5555:5555"
     depends_on:
-      - redis 
+      - redis
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
 ```
 #### 3. Start Flower
 
